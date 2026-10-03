@@ -1,0 +1,67 @@
+trigger:
+  branches:
+    include: [main]
+# Azure Repos PR validation must be configured through branch policies.
+pr:
+  branches:
+    include: [main]
+parameters:
+- name: publishToAzure
+  type: boolean
+  default: false
+- name: serviceConnection
+  type: string
+  default: ''
+- name: storageAccount
+  type: string
+  default: ''
+- name: container
+  type: string
+  default: releases
+pool:
+  vmImage: ubuntu-latest
+stages:
+- stage: ValidateBuild
+  jobs:
+  - job: Package
+    steps:
+    - checkout: self
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.11'
+    - script: python -m unittest discover -s tests -v
+      displayName: Test transformations and release integrity
+    - script: python data_job.py data/orders.csv demo/revenue.csv
+      displayName: Run the sample workload
+    - script: python tools/build_release.py "$(Build.ArtifactStagingDirectory)"
+      displayName: Build deterministic release
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)'
+        artifact: data-job
+- ${{ if eq(parameters.publishToAzure, true) }}:
+  - stage: Promote
+    dependsOn: ValidateBuild
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+    - deployment: PublishRelease
+      environment: data-platform-dev
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+            - download: current
+              artifact: data-job
+            - task: AzureCLI@2
+              inputs:
+                azureSubscription: '${{ parameters.serviceConnection }}'
+                scriptType: bash
+                scriptLocation: inlineScript
+                inlineScript: |
+                  test -n "$STORAGE_ACCOUNT"
+                  python -c "import hashlib,json,pathlib; p=pathlib.Path('$ARTIFACT_DIR'); m=json.loads((p/'manifest.json').read_text()); assert hashlib.sha256((p/m['artifact']).read_bytes()).hexdigest()==m['sha256']"
+                  az storage blob upload-batch --account-name "$STORAGE_ACCOUNT" --destination "$RELEASE_CONTAINER" --destination-path "$(Build.BuildId)" --source "$ARTIFACT_DIR" --auth-mode login --overwrite false
+              env:
+                STORAGE_ACCOUNT: '${{ parameters.storageAccount }}'
+                RELEASE_CONTAINER: '${{ parameters.container }}'
+                ARTIFACT_DIR: '$(Pipeline.Workspace)/data-job'

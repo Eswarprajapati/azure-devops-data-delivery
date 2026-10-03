@@ -1,0 +1,4 @@
+order_id,order_date,amount_cents,status
+o1,2026-01-01,1000,completed
+o2,2026-01-01,1500,completed
+o3,2026-01-01,900,cancelled
